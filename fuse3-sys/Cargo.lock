@@ -115,14 +115,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fusion-summon"
-version = "0.1.0"
-dependencies = [
- "fuse3-sys 0.0.1",
- "libc 0.2.40 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
 name = "glob"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
