@@ -107,14 +107,6 @@ version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
-name = "fuse3-sys"
-version = "0.0.1"
-dependencies = [
- "bindgen 0.35.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "metadeps 1.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
 name = "glob"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -2,4 +2,4 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-include!("../include/fuse3_bindings.rs");
+include!("../include/fuse_bindings.rs");

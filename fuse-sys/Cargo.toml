@@ -1,11 +1,8 @@
 [package]
-name = "fuse3-sys"
+name = "fuse-sys"
 version = "0.0.1"
 authors = ["Danny McClanahan <1305167+cosmicexplorer@users.noreply.github.com>"]
 
 [build-dependencies]
 bindgen = "0.35"
-metadeps = "1.1"
-
-[package.metadata.pkg-config]
-fuse3 = "3.2.1"
+pkg-config = "0.3.9"

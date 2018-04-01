@@ -1,4 +1,4 @@
-extern crate fuse3_sys;
+extern crate fuse_sys;
 extern crate libc;
 
 use std::default::Default;
@@ -14,15 +14,15 @@ use std::str;
 
 use libc::{EACCES, EINVAL, ENOENT};
 
-use fuse3_sys::{fuse_config, fuse_conn_info, fuse_file_info, fuse_fill_dir_t,
-                fuse_operations, fuse_readdir_flags, mode_t, off_t};
+use fuse_sys::{fuse_conn_info, fuse_file_info, fuse_fill_dir_t,
+               fuse_operations, mode_t, off_t};
 
 unsafe fn our_fuse_main(
   argc: c_int,
   argv: *mut *mut c_char,
-  op: *const fuse3_sys::fuse_operations,
+  op: *const fuse_sys::fuse_operations,
 ) -> c_int {
-  fuse3_sys::fuse_main_real(
+  fuse_sys::fuse_main_real(
     argc,
     argv,
     op,
@@ -52,35 +52,26 @@ static mut MY_FS: MyFS = MyFS {
   content: "",
 };
 
-unsafe extern "C" fn hello_init(
-  conn: *mut fuse_conn_info,
-  cfg: *mut fuse_config,
-) -> *mut c_void {
-  (*cfg).kernel_cache = 1 as c_int;
-  ptr::null_mut()
-}
-
 unsafe fn zero_stat_buf<'a>(
-  stat_ptr: *mut fuse3_sys::stat,
-) -> &'a mut fuse3_sys::stat {
+  stat_ptr: *mut fuse_sys::stat,
+) -> &'a mut fuse_sys::stat {
   ptr::write_bytes(stat_ptr, 0, 1);
   &mut *stat_ptr
 }
 
 unsafe extern "C" fn hello_getattr(
   path_c_str: *const c_char,
-  stbuf_ptr: *mut fuse3_sys::stat,
-  fi_ptr: *mut fuse_file_info,
+  stbuf_ptr: *mut fuse_sys::stat,
 ) -> c_int {
   let stbuf = zero_stat_buf(stbuf_ptr);
   let path = from_c_string(path_c_str);
 
   if path == "/" {
-    stbuf.st_mode = fuse3_sys::S_IFDIR | 0o755;
+    stbuf.st_mode = fuse_sys::S_IFDIR | 0o755;
     stbuf.st_nlink = 2;
     0
   } else if path == format!("/{}", MY_FS.filename) {
-    stbuf.st_mode = fuse3_sys::S_IFREG | 0o444;
+    stbuf.st_mode = fuse_sys::S_IFREG | 0o444;
     stbuf.st_nlink = 1;
     stbuf.st_size = MY_FS.content.len() as off_t;
     0
@@ -95,7 +86,6 @@ unsafe extern "C" fn hello_readdir(
   filler_ptr: fuse_fill_dir_t,
   offset: off_t,
   fi: *mut fuse_file_info,
-  flags: fuse_readdir_flags,
 ) -> c_int {
   let path = CStr::from_ptr(path_c_str).to_str().unwrap();
   if path != "/" {
@@ -108,7 +98,7 @@ unsafe extern "C" fn hello_readdir(
 
   for &s in entries.iter() {
     let cur_str = CString::new(s).unwrap();
-    filler_fn(buf, cur_str.as_ptr(), ptr::null_mut(), 0, 0);
+    filler_fn(buf, cur_str.as_ptr(), ptr::null_mut(), 0);
   }
 
   0
@@ -125,8 +115,8 @@ unsafe extern "C" fn hello_open(
   }
 
   let fi = *fi_ptr;
-  let access: u32 = (fi.flags as u32) & fuse3_sys::O_ACCMODE;
-  if access != fuse3_sys::O_RDONLY {
+  let access: u32 = (fi.flags as u32) & fuse_sys::O_ACCMODE;
+  if access != fuse_sys::O_RDONLY {
     return -EACCES;
   }
 
@@ -204,7 +194,6 @@ fn main() {
     MY_FS.content = "asdf\n";
 
     let hello_oper: fuse_operations = fuse_operations {
-      init: Some(hello_init),
       getattr: Some(hello_getattr),
       readdir: Some(hello_readdir),
       open: Some(hello_open),
