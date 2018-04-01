@@ -26,7 +26,7 @@ unsafe fn our_fuse_main(
     argc,
     argv,
     op,
-    mem::size_of::<fuse3_sys::fuse_operations>(),
+    mem::size_of_val(&*op),
     ptr::null_mut(),
   )
 }
