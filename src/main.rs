@@ -60,19 +60,21 @@ unsafe extern "C" fn hello_init(
   ptr::null_mut()
 }
 
+unsafe fn zero_stat_buf<'a>(
+  stat_ptr: *mut fuse3_sys::stat,
+) -> &'a mut fuse3_sys::stat {
+  ptr::write_bytes(stat_ptr, 0, 1);
+  &mut *stat_ptr
+}
+
 unsafe extern "C" fn hello_getattr(
   path_c_str: *const c_char,
   stbuf_ptr: *mut fuse3_sys::stat,
   fi_ptr: *mut fuse_file_info,
 ) -> c_int {
-  libc::memset(
-    stbuf_ptr as *mut libc::c_void,
-    0,
-    mem::size_of::<fuse3_sys::stat>(),
-  );
-  let stbuf = &mut *stbuf_ptr;
-
+  let stbuf = zero_stat_buf(stbuf_ptr);
   let path = from_c_string(path_c_str);
+
   if path == "/" {
     stbuf.st_mode = fuse3_sys::S_IFDIR | 0o755;
     stbuf.st_nlink = 2;
@@ -102,9 +104,9 @@ unsafe extern "C" fn hello_readdir(
 
   let filler_fn = filler_ptr.unwrap();
 
-  let entries = vec![".", "..", MY_FS.filename];
+  let entries = [".", "..", MY_FS.filename];
 
-  for s in entries {
+  for &s in entries.iter() {
     let cur_str = CString::new(s).unwrap();
     filler_fn(buf, cur_str.as_ptr(), ptr::null_mut(), 0, 0);
   }
@@ -118,7 +120,7 @@ unsafe extern "C" fn hello_open(
 ) -> c_int {
   let path = from_c_string(path_c_str);
 
-  if &path[1..] != MY_FS.filename {
+  if path != format!("/{}", MY_FS.filename) {
     return -ENOENT;
   }
 
