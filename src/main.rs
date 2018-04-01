@@ -67,11 +67,11 @@ unsafe extern "C" fn hello_getattr(
   let path = from_c_string(path_c_str);
 
   if path == "/" {
-    stbuf.st_mode = fuse_sys::S_IFDIR | 0o755;
+    stbuf.st_mode = (fuse_sys::S_IFDIR | 0o755) as mode_t;
     stbuf.st_nlink = 2;
     0
   } else if path == format!("/{}", MY_FS.filename) {
-    stbuf.st_mode = fuse_sys::S_IFREG | 0o444;
+    stbuf.st_mode = (fuse_sys::S_IFREG | 0o444) as mode_t;
     stbuf.st_nlink = 1;
     stbuf.st_size = MY_FS.content.len() as off_t;
     0
@@ -175,18 +175,22 @@ fn main() {
     .iter()
     .map(|s| s.as_str())
     .collect::<Vec<&str>>();
-  let fuse_args: Vec<&str> = match &args[..] {
-    &[exe, "--help"] => vec![exe, "--help"],
-    &[exe, mp, src] => {
-      if !Path::new(mp).is_dir() {
-        panic!("no mount dir bro");
-      }
-      if !Path::new(src).is_dir() {
-        panic!("no source dir broskimo");
-      }
-      vec![exe, "-o", "ro", "-o", "fsname=myfs", "-d", mp]
+  let fuse_args: Vec<&str> = if args.len() == 2 && args[1] == "--help" {
+    let exe = args[0];
+    vec![exe, "--help"]
+  } else if args.len() == 3 {
+    let exe = args[0];
+    let mp = args[1];
+    let src = args[2];
+    if !Path::new(mp).is_dir() {
+      panic!("no mount dir bro");
     }
-    _ => panic!("we need a mountpoint AND a source lol"),
+    if !Path::new(src).is_dir() {
+      panic!("no source dir broskimo");
+    }
+    vec![exe, "-o", "ro", "-o", "fsname=myfs", "-d", mp]
+  } else {
+    panic!("we need a mountpoint AND a source lol")
   };
 
   unsafe {

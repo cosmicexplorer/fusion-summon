@@ -19,11 +19,12 @@ fn main() {
   let include_dir_args = &fuse_dep
     .include_paths
     .iter()
-    .map(|p| format!("-I{}", p.to_str().unwrap()));
+    .map(|p| format!("-I{}", p.to_str().unwrap()))
+    .collect::<Vec<String>>();
 
   let fuse_bindings = bindgen::Builder::default()
     .clang_arg("-D_FILE_OFFSET_BITS=64")
-    .clang_args(include_dir_args.clone())
+    .clang_args(include_dir_args)
     .derive_debug(true)
     .derive_default(true)
     .rustfmt_bindings(true)
