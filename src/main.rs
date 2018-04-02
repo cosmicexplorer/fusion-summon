@@ -4,8 +4,9 @@ extern crate libc;
 use std::default::Default;
 use std::env;
 use std::ffi::{CStr, CString, OsStr, OsString};
-use std::fs;
+use std::fs::{self, File};
 use std::iter::{IntoIterator, Iterator};
+use std::io::{Read, Seek, SeekFrom};
 use std::mem;
 use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::fs::MetadataExt;
@@ -14,7 +15,7 @@ use std::ptr;
 use std::slice;
 use std::str;
 
-use libc::{EACCES, EINVAL, ENOENT};
+use libc::{EACCES, EINVAL, EISDIR, ENOENT};
 
 use fuse_sys::{fuse_conn_info, fuse_file_info, fuse_fill_dir_t,
                fuse_operations, mode_t, off_t};
@@ -97,13 +98,27 @@ unsafe extern "C" fn hello_getattr(
   stbuf_ptr: *mut fuse_sys::stat,
 ) -> c_int {
   let stbuf = zero_stat_buf(stbuf_ptr);
-  let path = from_c_string(path_c_str);
 
-  if path == "/" {
-    let src_dir = &*MY_FS.src_dir;
-    let src_metadata = fs::metadata(src_dir).unwrap();
-    stbuf.st_mode = src_metadata.mode() as mode_t;
-    stbuf.st_nlink = src_metadata.nlink();
+  let rel_path_with_slash = from_c_string(path_c_str);
+
+  if !rel_path_with_slash.starts_with("/") {
+    return -ENOENT;
+  }
+
+  let rel_path = &rel_path_with_slash[1..];
+
+  let resulting_path = (&*MY_FS.src_dir).join(rel_path);
+
+  if resulting_path.is_dir() {
+    let dir_data = fs::metadata(resulting_path).unwrap();
+    stbuf.st_mode = dir_data.mode() as mode_t;
+    stbuf.st_nlink = dir_data.nlink();
+    0
+  } else if resulting_path.is_file() {
+    let file_data = fs::metadata(resulting_path).unwrap();
+    stbuf.st_mode = file_data.mode() as mode_t;
+    stbuf.st_nlink = file_data.nlink();
+    stbuf.st_size = file_data.size() as off_t;
     0
   } else {
     -ENOENT
@@ -117,18 +132,39 @@ unsafe extern "C" fn hello_readdir(
   offset: off_t,
   fi: *mut fuse_file_info,
 ) -> c_int {
-  let path = CStr::from_ptr(path_c_str).to_str().unwrap();
-  if path != "/" {
+  let rel_path_with_slash = from_c_string(path_c_str);
+
+  if !rel_path_with_slash.starts_with("/") {
+    return -ENOENT;
+  }
+
+  let rel_path = &rel_path_with_slash[1..];
+
+  let resulting_path = (&*MY_FS.src_dir).join(rel_path);
+
+  if !resulting_path.is_dir() {
     return -ENOENT;
   }
 
   let filler_fn = filler_ptr.unwrap();
 
-  let entries = [".", ".."];
+  let source_readdir = fs::read_dir(resulting_path).unwrap();
 
-  for &s in entries.iter() {
-    let cur_str = CString::new(s).unwrap();
-    filler_fn(buf, cur_str.as_ptr(), ptr::null_mut(), 0);
+  let mut source_paths = source_readdir
+    .map(|dir_result| {
+      // FIXME: too much ownership nonsense here
+      let entry_path: &PathBuf = &dir_result.unwrap().path();
+      let fname: &OsStr = entry_path.file_name().unwrap();
+      fname.to_os_string().into_string().unwrap()
+    })
+    .collect::<Vec<String>>();
+
+  source_paths.push(String::from(".."));
+  source_paths.push(String::from("."));
+
+  for s in source_paths {
+    let c_str = CString::new(s.as_str()).unwrap();
+    filler_fn(buf, c_str.as_ptr(), ptr::null_mut(), 0);
   }
 
   0
@@ -138,21 +174,31 @@ unsafe extern "C" fn hello_open(
   path_c_str: *const c_char,
   fi_ptr: *mut fuse_file_info,
 ) -> c_int {
-  let path = from_c_string(path_c_str);
+  let rel_path_with_slash = from_c_string(path_c_str);
 
-  -ENOENT
+  if !rel_path_with_slash.starts_with("/") {
+    return -ENOENT;
+  }
 
-  // if path != format!("/{}", MY_FS.filename) {
-  //   return -ENOENT;
-  // }
+  let rel_path = &rel_path_with_slash[1..];
 
-  // let fi = *fi_ptr;
-  // let access: u32 = (fi.flags as u32) & fuse_sys::O_ACCMODE;
-  // if access != fuse_sys::O_RDONLY {
-  //   return -EACCES;
-  // }
+  let resulting_path = (&*MY_FS.src_dir).join(rel_path);
 
-  // 0
+  if resulting_path.is_dir() {
+    return -EISDIR;
+  }
+
+  if !resulting_path.is_file() {
+    return -ENOENT;
+  }
+
+  let fi = *fi_ptr;
+  let access: u32 = (fi.flags as u32) & fuse_sys::O_ACCMODE;
+  if access != fuse_sys::O_RDONLY {
+    return -EACCES;
+  }
+
+  0
 }
 
 unsafe extern "C" fn hello_read(
@@ -162,45 +208,36 @@ unsafe extern "C" fn hello_read(
   offset: off_t,
   fi: *mut fuse_file_info,
 ) -> c_int {
-  let path = from_c_string(path_c_str);
+  let rel_path_with_slash = from_c_string(path_c_str);
 
-  -ENOENT
+  if !rel_path_with_slash.starts_with("/") {
+    return -ENOENT;
+  }
 
-  // if &path[1..] != MY_FS.filename {
-  //   return -ENOENT;
-  // }
+  let rel_path = &rel_path_with_slash[1..];
 
-  // let len = MY_FS.content.len();
+  let resulting_path = (&*MY_FS.src_dir).join(rel_path);
 
-  // if offset < 0 {
-  //   return -EINVAL;
-  // }
+  if resulting_path.is_dir() {
+    return -EISDIR;
+  }
 
-  // let off: usize = offset as usize;
+  if !resulting_path.is_file() {
+    return -ENOENT;
+  }
 
-  // if off >= len {
-  //   0
-  // } else {
-  //   let adj_size = if (off + size) > len {
-  //     len - off
-  //   } else {
-  //     size
-  //   };
+  if offset < 0 {
+    return -EINVAL;
+  }
 
-  //   let src_vec = &MY_FS
-  //     .content
-  //     .as_bytes()
-  //     .iter()
-  //     .map(|&b| b as c_char)
-  //     .collect::<Vec<c_char>>();
-  //   let src_slice = &src_vec.as_slice();
+  let off: usize = offset as usize;
 
-  //   let dest_slice = slice::from_raw_parts_mut(buf, adj_size);
+  let mut target_file = File::open(resulting_path).unwrap();
+  target_file.seek(SeekFrom::Start(off as u64));
 
-  //   dest_slice.copy_from_slice(&src_slice[off..(off + adj_size)]);
+  let dest_slice = slice::from_raw_parts_mut(buf as *mut u8, size);
 
-  //   adj_size as c_int
-  // }
+  target_file.read(dest_slice).unwrap() as c_int
 }
 
 fn main() {
