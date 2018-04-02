@@ -17,7 +17,40 @@ use libc::{EACCES, EINVAL, ENOENT};
 use fuse_sys::{fuse_conn_info, fuse_file_info, fuse_fill_dir_t,
                fuse_operations, mode_t, off_t};
 
-unsafe fn our_fuse_main(
+// fuse_main() is implemented a C preprocessor macro, so we redefine it here as
+// a rust function, copying over the relevant part of the source.
+/**
+ * Main function of FUSE.
+ *
+ * This is for the lazy.  This is all that has to be called from the
+ * main() function.
+ *
+ * This function does the following:
+ *   - parses command line options (-d -s and -h)
+ *   - passes relevant mount options to the fuse_mount()
+ *   - installs signal handlers for INT, HUP, TERM and PIPE
+ *   - registers an exit handler to unmount the filesystem on program exit
+ *   - creates a fuse handle
+ *   - registers the operations
+ *   - calls either the single-threaded or the multi-threaded event loop
+ *
+ * Note: this is currently implemented as a macro.
+ *
+ * @param argc the argument counter passed to the main() function
+ * @param argv the argument vector passed to the main() function
+ * @param op the file system operation
+ * @param user_data user data supplied in the context during the init() method
+ * @return 0 on success, nonzero on failure
+ */
+/*
+  int fuse_main(int argc, char *argv[], const struct fuse_operations *op,
+  void *user_data);
+ */
+/*
+#define fuse_main(argc, argv, op, user_data)				\
+        fuse_main_real(argc, argv, op, sizeof(*(op)), user_data)
+*/
+unsafe fn fuse_main_wrapper(
   argc: c_int,
   argv: *mut *mut c_char,
   op: *const fuse_sys::fuse_operations,
@@ -207,7 +240,7 @@ fn main() {
 
     let mut c_fuse_args = into_c_string_vec(fuse_args);
 
-    our_fuse_main(
+    fuse_main_wrapper(
       *&c_fuse_args.len() as c_int,
       *&c_fuse_args.as_mut_ptr(),
       &hello_oper,
