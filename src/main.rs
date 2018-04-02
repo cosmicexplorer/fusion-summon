@@ -4,9 +4,11 @@ extern crate libc;
 use std::default::Default;
 use std::env;
 use std::ffi::{CStr, CString, OsStr, OsString};
+use std::fs;
 use std::iter::{IntoIterator, Iterator};
 use std::mem;
 use std::os::raw::{c_char, c_int, c_void};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
@@ -75,14 +77,12 @@ unsafe fn into_c_string_vec(args: Vec<&str>) -> Vec<*mut c_char> {
     .collect::<Vec<*mut c_char>>()
 }
 
-struct MyFS<'a> {
-  filename: &'a str,
-  content: &'a str,
+struct MyFS {
+  src_dir: *const PathBuf,
 }
 
 static mut MY_FS: MyFS = MyFS {
-  filename: "",
-  content: "",
+  src_dir: ptr::null_mut(),
 };
 
 unsafe fn zero_stat_buf<'a>(
@@ -100,13 +100,10 @@ unsafe extern "C" fn hello_getattr(
   let path = from_c_string(path_c_str);
 
   if path == "/" {
-    stbuf.st_mode = (fuse_sys::S_IFDIR | 0o755) as mode_t;
-    stbuf.st_nlink = 2;
-    0
-  } else if path == format!("/{}", MY_FS.filename) {
-    stbuf.st_mode = (fuse_sys::S_IFREG | 0o444) as mode_t;
-    stbuf.st_nlink = 1;
-    stbuf.st_size = MY_FS.content.len() as off_t;
+    let src_dir = &*MY_FS.src_dir;
+    let src_metadata = fs::metadata(src_dir).unwrap();
+    stbuf.st_mode = src_metadata.mode() as mode_t;
+    stbuf.st_nlink = src_metadata.nlink();
     0
   } else {
     -ENOENT
@@ -127,7 +124,7 @@ unsafe extern "C" fn hello_readdir(
 
   let filler_fn = filler_ptr.unwrap();
 
-  let entries = [".", "..", MY_FS.filename];
+  let entries = [".", ".."];
 
   for &s in entries.iter() {
     let cur_str = CString::new(s).unwrap();
@@ -143,17 +140,19 @@ unsafe extern "C" fn hello_open(
 ) -> c_int {
   let path = from_c_string(path_c_str);
 
-  if path != format!("/{}", MY_FS.filename) {
-    return -ENOENT;
-  }
+  -ENOENT
 
-  let fi = *fi_ptr;
-  let access: u32 = (fi.flags as u32) & fuse_sys::O_ACCMODE;
-  if access != fuse_sys::O_RDONLY {
-    return -EACCES;
-  }
+  // if path != format!("/{}", MY_FS.filename) {
+  //   return -ENOENT;
+  // }
 
-  0
+  // let fi = *fi_ptr;
+  // let access: u32 = (fi.flags as u32) & fuse_sys::O_ACCMODE;
+  // if access != fuse_sys::O_RDONLY {
+  //   return -EACCES;
+  // }
+
+  // 0
 }
 
 unsafe extern "C" fn hello_read(
@@ -165,41 +164,43 @@ unsafe extern "C" fn hello_read(
 ) -> c_int {
   let path = from_c_string(path_c_str);
 
-  if &path[1..] != MY_FS.filename {
-    return -ENOENT;
-  }
+  -ENOENT
 
-  let len = MY_FS.content.len();
+  // if &path[1..] != MY_FS.filename {
+  //   return -ENOENT;
+  // }
 
-  if offset < 0 {
-    return -EINVAL;
-  }
+  // let len = MY_FS.content.len();
 
-  let off: usize = offset as usize;
+  // if offset < 0 {
+  //   return -EINVAL;
+  // }
 
-  if off >= len {
-    0
-  } else {
-    let adj_size = if (off + size) > len {
-      len - off
-    } else {
-      size
-    };
+  // let off: usize = offset as usize;
 
-    let src_vec = &MY_FS
-      .content
-      .as_bytes()
-      .iter()
-      .map(|&b| b as c_char)
-      .collect::<Vec<c_char>>();
-    let src_slice = &src_vec.as_slice();
+  // if off >= len {
+  //   0
+  // } else {
+  //   let adj_size = if (off + size) > len {
+  //     len - off
+  //   } else {
+  //     size
+  //   };
 
-    let dest_slice = slice::from_raw_parts_mut(buf, adj_size);
+  //   let src_vec = &MY_FS
+  //     .content
+  //     .as_bytes()
+  //     .iter()
+  //     .map(|&b| b as c_char)
+  //     .collect::<Vec<c_char>>();
+  //   let src_slice = &src_vec.as_slice();
 
-    dest_slice.copy_from_slice(&src_slice[off..(off + adj_size)]);
+  //   let dest_slice = slice::from_raw_parts_mut(buf, adj_size);
 
-    adj_size as c_int
-  }
+  //   dest_slice.copy_from_slice(&src_slice[off..(off + adj_size)]);
+
+  //   adj_size as c_int
+  // }
 }
 
 fn main() {
@@ -208,27 +209,25 @@ fn main() {
     .iter()
     .map(|s| s.as_str())
     .collect::<Vec<&str>>();
-  let fuse_args: Vec<&str> = if args.len() == 2 && args[1] == "--help" {
-    let exe = args[0];
-    vec![exe, "--help"]
-  } else if args.len() == 3 {
-    let exe = args[0];
-    let mp = args[1];
-    let src = args[2];
-    if !Path::new(mp).is_dir() {
-      panic!("no mount dir bro");
-    }
-    if !Path::new(src).is_dir() {
-      panic!("no source dir broskimo");
-    }
-    vec![exe, "-o", "ro", "-o", "fsname=myfs", "-d", mp]
-  } else {
-    panic!("we need a mountpoint AND a source lol")
-  };
+  if args.len() != 3 {
+    panic!("we need a mountpoint AND a source lol");
+  }
+  let exe = args[0];
+  let mp = args[1];
+  let src = args[2];
+  if !Path::new(mp).is_dir() {
+    panic!("no mount dir bro (was: {:?})", mp);
+  }
+  let src_dir = PathBuf::from(src);
+  if !src_dir.is_dir() {
+    panic!("no source dir broskimo (was: {:?})", src);
+  }
+
+  let fuse_args: Vec<&str> =
+    vec![exe, "-o", "ro", "-o", "fsname=myfs", "-d", mp];
 
   unsafe {
-    MY_FS.filename = "hello.txt";
-    MY_FS.content = "asdf\n";
+    MY_FS.src_dir = &src_dir;
 
     let hello_oper: fuse_operations = fuse_operations {
       getattr: Some(hello_getattr),
