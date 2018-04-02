@@ -3,10 +3,10 @@ extern crate libc;
 
 use std::default::Default;
 use std::env;
-use std::ffi::{CStr, CString, OsStr, OsString};
+use std::ffi::{self, CStr, CString, OsStr, OsString};
 use std::fs::{self, File};
 use std::iter::{IntoIterator, Iterator};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::mem;
 use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::fs::MetadataExt;
@@ -15,10 +15,34 @@ use std::ptr;
 use std::slice;
 use std::str;
 
-use libc::{EACCES, EINVAL, EISDIR, ENOENT};
+use libc::{EACCES, EINVAL, EIO, EISDIR, ENOENT, EREMOTEIO};
 
 use fuse_sys::{fuse_conn_info, fuse_file_info, fuse_fill_dir_t,
                fuse_operations, mode_t, off_t};
+
+enum FusionFSError {
+  ErrnoError(c_int),
+}
+
+type FusionFSResult<T> = Result<T, FusionFSError>;
+
+impl From<str::Utf8Error> for FusionFSError {
+  fn from(error: str::Utf8Error) -> Self {
+    FusionFSError::ErrnoError(EINVAL)
+  }
+}
+
+impl From<io::Error> for FusionFSError {
+  fn from(error: io::Error) -> Self {
+    FusionFSError::ErrnoError(EREMOTEIO)
+  }
+}
+
+impl From<ffi::NulError> for FusionFSError {
+  fn from(error: ffi::NulError) -> Self {
+    FusionFSError::ErrnoError(EIO)
+  }
+}
 
 // fuse_main() is implemented a C preprocessor macro, so we redefine it here as
 // a rust function, copying over the relevant part of the source.
@@ -67,8 +91,10 @@ unsafe fn fuse_main_wrapper(
   )
 }
 
-unsafe fn from_c_string<'a>(s: *const c_char) -> &'a str {
-  CStr::from_ptr(s).to_str().unwrap()
+unsafe fn from_c_string<'a>(
+  s: *const c_char,
+) -> Result<&'a str, str::Utf8Error> {
+  CStr::from_ptr(s).to_str()
 }
 
 unsafe fn into_c_string_vec(args: Vec<&str>) -> Vec<*mut c_char> {
@@ -93,66 +119,68 @@ unsafe fn zero_stat_buf<'a>(
   &mut *stat_ptr
 }
 
+unsafe fn get_rel_path(
+  relpath: *const c_char,
+) -> Result<PathBuf, FusionFSError> {
+  let rel_path_with_slash = from_c_string(relpath)?;
+
+  if !rel_path_with_slash.starts_with("/") {
+    return Err(FusionFSError::ErrnoError(ENOENT));
+  }
+
+  let rel_path = &rel_path_with_slash[1..];
+
+  let src_dir = &*MY_FS.src_dir;
+  Ok(src_dir.join(rel_path))
+}
+
+fn do_getattr(
+  pb: PathBuf,
+  stbuf: &mut fuse_sys::stat,
+) -> Result<c_int, FusionFSError> {
+  if pb.is_dir() {
+    let dir_data = fs::metadata(pb)?;
+    stbuf.st_mode = dir_data.mode() as mode_t;
+    stbuf.st_nlink = dir_data.nlink();
+    Ok(0)
+  } else if pb.is_file() {
+    let file_data = fs::metadata(pb)?;
+    stbuf.st_mode = file_data.mode() as mode_t;
+    stbuf.st_nlink = file_data.nlink();
+    stbuf.st_size = file_data.size() as off_t;
+    Ok(0)
+  } else {
+    Err(FusionFSError::ErrnoError(ENOENT))
+  }
+}
+
 unsafe extern "C" fn hello_getattr(
   path_c_str: *const c_char,
   stbuf_ptr: *mut fuse_sys::stat,
 ) -> c_int {
-  let stbuf = zero_stat_buf(stbuf_ptr);
+  let mut stbuf = zero_stat_buf(stbuf_ptr);
 
-  let rel_path_with_slash = from_c_string(path_c_str);
+  let resulting_path = match get_rel_path(path_c_str) {
+    Ok(res_path) => res_path,
+    Err(FusionFSError::ErrnoError(ec)) => return -ec,
+  };
 
-  if !rel_path_with_slash.starts_with("/") {
-    return -ENOENT;
-  }
-
-  let rel_path = &rel_path_with_slash[1..];
-
-  let resulting_path = (&*MY_FS.src_dir).join(rel_path);
-
-  if resulting_path.is_dir() {
-    let dir_data = fs::metadata(resulting_path).unwrap();
-    stbuf.st_mode = dir_data.mode() as mode_t;
-    stbuf.st_nlink = dir_data.nlink();
-    0
-  } else if resulting_path.is_file() {
-    let file_data = fs::metadata(resulting_path).unwrap();
-    stbuf.st_mode = file_data.mode() as mode_t;
-    stbuf.st_nlink = file_data.nlink();
-    stbuf.st_size = file_data.size() as off_t;
-    0
-  } else {
-    -ENOENT
+  match do_getattr(resulting_path, &mut stbuf) {
+    Ok(rc) => rc,
+    Err(FusionFSError::ErrnoError(ec)) => return -ec,
   }
 }
 
-unsafe extern "C" fn hello_readdir(
-  path_c_str: *const c_char,
-  buf: *mut c_void,
-  filler_ptr: fuse_fill_dir_t,
-  offset: off_t,
-  fi: *mut fuse_file_info,
-) -> c_int {
-  let rel_path_with_slash = from_c_string(path_c_str);
-
-  if !rel_path_with_slash.starts_with("/") {
-    return -ENOENT;
+fn get_source_readdir(pb: PathBuf) -> FusionFSResult<Vec<String>> {
+  if !pb.is_dir() {
+    return Err(FusionFSError::ErrnoError(EINVAL));
   }
 
-  let rel_path = &rel_path_with_slash[1..];
-
-  let resulting_path = (&*MY_FS.src_dir).join(rel_path);
-
-  if !resulting_path.is_dir() {
-    return -ENOENT;
-  }
-
-  let filler_fn = filler_ptr.unwrap();
-
-  let source_readdir = fs::read_dir(resulting_path).unwrap();
+  let source_readdir = fs::read_dir(pb)?;
 
   let mut source_paths = source_readdir
     .map(|dir_result| {
-      // FIXME: too much ownership nonsense here
+      // FIXME: too much ownership nonsense here, no proper error handling
       let entry_path: &PathBuf = &dir_result.unwrap().path();
       let fname: &OsStr = entry_path.file_name().unwrap();
       fname.to_os_string().into_string().unwrap()
@@ -162,43 +190,106 @@ unsafe extern "C" fn hello_readdir(
   source_paths.push(String::from(".."));
   source_paths.push(String::from("."));
 
-  for s in source_paths {
-    let c_str = CString::new(s.as_str()).unwrap();
+  Ok(source_paths)
+}
+
+unsafe fn fill_dir(
+  buf: &mut c_void,
+  paths: Vec<String>,
+  filler_ptr: fuse_fill_dir_t,
+) -> FusionFSResult<c_int> {
+  let filler_fn = match filler_ptr {
+    None => return Err(FusionFSError::ErrnoError(EINVAL)),
+    Some(f) => f,
+  };
+
+  for p in paths {
+    let c_str = CString::new(p.as_str())?;
     filler_fn(buf, c_str.as_ptr(), ptr::null_mut(), 0);
   }
 
-  0
+  Ok(0)
+}
+
+unsafe extern "C" fn hello_readdir(
+  path_c_str: *const c_char,
+  buf: *mut c_void,
+  filler_ptr: fuse_fill_dir_t,
+  offset: off_t,
+  fi: *mut fuse_file_info,
+) -> c_int {
+  let resulting_path = match get_rel_path(path_c_str) {
+    Ok(res) => res,
+    Err(FusionFSError::ErrnoError(ec)) => return -ec,
+  };
+
+  let source_paths = match get_source_readdir(resulting_path) {
+    Ok(path_vec) => path_vec,
+    Err(FusionFSError::ErrnoError(ec)) => return -ec,
+  };
+
+  match fill_dir(&mut *buf, source_paths, filler_ptr) {
+    Ok(rc) => rc,
+    Err(FusionFSError::ErrnoError(ec)) => return -ec,
+  }
+}
+
+fn do_open(pb: PathBuf, fi: &mut fuse_file_info) -> FusionFSResult<c_int> {
+  if pb.is_dir() {
+    return Err(FusionFSError::ErrnoError(EISDIR));
+  }
+  if !pb.is_file() {
+    return Err(FusionFSError::ErrnoError(ENOENT));
+  }
+
+  let access: u32 = (fi.flags as u32) & fuse_sys::O_ACCMODE;
+  if access == fuse_sys::O_RDONLY {
+    Ok(0)
+  } else {
+    Err(FusionFSError::ErrnoError(EACCES))
+  }
 }
 
 unsafe extern "C" fn hello_open(
   path_c_str: *const c_char,
   fi_ptr: *mut fuse_file_info,
 ) -> c_int {
-  let rel_path_with_slash = from_c_string(path_c_str);
+  let resulting_path = match get_rel_path(path_c_str) {
+    Ok(res) => res,
+    Err(FusionFSError::ErrnoError(ec)) => return -ec,
+  };
 
-  if !rel_path_with_slash.starts_with("/") {
-    return -ENOENT;
+  match do_open(resulting_path, &mut *fi_ptr) {
+    Ok(rc) => rc,
+    Err(FusionFSError::ErrnoError(ec)) => return -ec,
+  }
+}
+
+unsafe fn do_read(
+  pb: PathBuf,
+  buf: *mut c_char,
+  size: usize,
+  offset: off_t,
+) -> FusionFSResult<c_int> {
+  if pb.is_dir() {
+    return Err(FusionFSError::ErrnoError(EISDIR));
+  }
+  if !pb.is_file() {
+    return Err(FusionFSError::ErrnoError(ENOENT));
   }
 
-  let rel_path = &rel_path_with_slash[1..];
-
-  let resulting_path = (&*MY_FS.src_dir).join(rel_path);
-
-  if resulting_path.is_dir() {
-    return -EISDIR;
+  if offset < 0 {
+    return Err(FusionFSError::ErrnoError(EINVAL));
   }
 
-  if !resulting_path.is_file() {
-    return -ENOENT;
-  }
+  let mut target_file = File::open(pb)?;
+  target_file.seek(SeekFrom::Start(offset as u64));
 
-  let fi = *fi_ptr;
-  let access: u32 = (fi.flags as u32) & fuse_sys::O_ACCMODE;
-  if access != fuse_sys::O_RDONLY {
-    return -EACCES;
-  }
+  let dest_slice = slice::from_raw_parts_mut(buf as *mut u8, size);
 
-  0
+  let bytes_read = target_file.read(dest_slice)?;
+
+  Ok(bytes_read as c_int)
 }
 
 unsafe extern "C" fn hello_read(
@@ -208,36 +299,15 @@ unsafe extern "C" fn hello_read(
   offset: off_t,
   fi: *mut fuse_file_info,
 ) -> c_int {
-  let rel_path_with_slash = from_c_string(path_c_str);
+  let resulting_path = match get_rel_path(path_c_str) {
+    Ok(res) => res,
+    Err(FusionFSError::ErrnoError(ec)) => return -ec,
+  };
 
-  if !rel_path_with_slash.starts_with("/") {
-    return -ENOENT;
+  match do_read(resulting_path, buf, size, offset) {
+    Ok(rc) => rc,
+    Err(FusionFSError::ErrnoError(ec)) => return -ec,
   }
-
-  let rel_path = &rel_path_with_slash[1..];
-
-  let resulting_path = (&*MY_FS.src_dir).join(rel_path);
-
-  if resulting_path.is_dir() {
-    return -EISDIR;
-  }
-
-  if !resulting_path.is_file() {
-    return -ENOENT;
-  }
-
-  if offset < 0 {
-    return -EINVAL;
-  }
-
-  let off: usize = offset as usize;
-
-  let mut target_file = File::open(resulting_path).unwrap();
-  target_file.seek(SeekFrom::Start(off as u64));
-
-  let dest_slice = slice::from_raw_parts_mut(buf as *mut u8, size);
-
-  target_file.read(dest_slice).unwrap() as c_int
 }
 
 fn main() {
@@ -247,7 +317,10 @@ fn main() {
     .map(|s| s.as_str())
     .collect::<Vec<&str>>();
   if args.len() != 3 {
-    panic!("we need a mountpoint AND a source lol");
+    panic!(
+      "we need a mountpoint AND a source lol (args: {:?})",
+      args
+    );
   }
   let exe = args[0];
   let mp = args[1];
