@@ -134,21 +134,35 @@ unsafe fn get_rel_path(
   Ok(src_dir.join(rel_path))
 }
 
+fn getattr_dir(
+  pb: PathBuf,
+  stat: &mut fuse_sys::stat,
+) -> Result<c_int, FusionFSError> {
+  let dir_data = fs::metadata(pb)?;
+  stat.st_mode = dir_data.mode() as mode_t;
+  stat.st_nlink = dir_data.nlink();
+  Ok(0)
+}
+
+fn getattr_file(
+  pb: PathBuf,
+  stat: &mut fuse_sys::stat
+) -> Result<c_int, FusionFSError> {
+  let file_data = fs::metadata(pb)?;
+  stat.st_mode = file_data.mode() as mode_t;
+  stat.st_nlink = file_data.nlink();
+  stat.st_size = file_data.size() as off_t;
+  Ok(0)
+}
+
 fn do_getattr(
   pb: PathBuf,
-  stbuf: &mut fuse_sys::stat,
+  mut stbuf: &mut fuse_sys::stat,
 ) -> Result<c_int, FusionFSError> {
   if pb.is_dir() {
-    let dir_data = fs::metadata(pb)?;
-    stbuf.st_mode = dir_data.mode() as mode_t;
-    stbuf.st_nlink = dir_data.nlink();
-    Ok(0)
+    getattr_dir(pb, &mut stbuf)
   } else if pb.is_file() {
-    let file_data = fs::metadata(pb)?;
-    stbuf.st_mode = file_data.mode() as mode_t;
-    stbuf.st_nlink = file_data.nlink();
-    stbuf.st_size = file_data.size() as off_t;
-    Ok(0)
+    getattr_file(pb, &mut stbuf)
   } else {
     Err(FusionFSError::ErrnoError(ENOENT))
   }
@@ -205,6 +219,7 @@ unsafe fn fill_dir(
 
   for p in paths {
     let c_str = CString::new(p.as_str())?;
+    // TODO: check the bindings for docs on the return value of this function
     filler_fn(buf, c_str.as_ptr(), ptr::null_mut(), 0);
   }
 
